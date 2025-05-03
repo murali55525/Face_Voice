@@ -25,6 +25,13 @@ from datetime import datetime
 import json
 import warnings
 
+# Initialize logger
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
 # Suppress warnings
 warnings.filterwarnings("ignore")
 
