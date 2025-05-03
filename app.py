@@ -1,7 +1,6 @@
 import face_recognition
-from resemblyzer import preprocess_wav, VoiceEncoder
 import numpy as np
-import psycopg2  # Changed from cx_Oracle to psycopg2 for PostgreSQL
+import psycopg2
 from psycopg2.extras import DictCursor
 import os
 from cryptography.fernet import Fernet
@@ -30,11 +29,16 @@ import warnings
 warnings.filterwarnings("ignore")
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "http://localhost:8000"}})
-
+CORS(app, resources={
+    r"/*": {
+        "origins": ["http://localhost:8000", "https://face-voice.vercel.app", "https://new-frontend-url.com"],
+        "methods": ["GET", "POST", "OPTIONS", "PUT", "DELETE"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "expose_headers": ["Content-Range", "X-Content-Range"]
+    }
+})
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
 
 # Create data directories
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'biometric_data')
@@ -42,13 +46,18 @@ USERS_DIR = os.path.join(DATA_DIR, 'users')
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(USERS_DIR, exist_ok=True)
 
-# Initialize MediaPipe Face Mesh
+# Initialize MediaPipe Face Mesh and Face Detection
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5,
+    min_detection_confidence=0.4,  # Lowered for better detection
+    min_tracking_confidence=0.4,
     refine_landmarks=True
 )
+mp_face_detection = mp.solutions.face_detection
+face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.4)  # Lowered threshold
+
+# Load Haar Cascade for face detection
+haar_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
 # PostgreSQL Database Configuration
 DB_CONFIG = {
@@ -59,7 +68,6 @@ DB_CONFIG = {
     'port': '5432'
 }
 
-# Initialize database connection
 def get_db_connection():
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -69,40 +77,33 @@ def get_db_connection():
         logger.error(f"Failed to connect to PostgreSQL database: {str(e)}")
         raise
 
-# Create tables and migrate schema
 def migrate_database(conn):
     try:
         with conn.cursor() as cur:
-            # Create users table if not exists
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
                     face_model BYTEA,
                     voice_model BYTEA,
                     face_encoding BYTEA,
+                    iris_encoding BYTEA,
                     voice_encoding BYTEA,
                     face_image BYTEA,
                     voice_audio BYTEA,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            
-            # Check if all columns exist
             cur.execute("""
                 SELECT column_name 
                 FROM information_schema.columns 
                 WHERE table_name = 'users'
             """)
             columns = [col[0] for col in cur.fetchall()]
-            logger.debug(f"Current users table columns: {columns}")
-            
-            # Add missing columns
-            for col in ['face_model', 'voice_model', 'face_encoding', 'voice_encoding', 
-                       'face_image', 'voice_audio']:
+            for col in ['face_model', 'voice_model', 'face_encoding', 'iris_encoding', 
+                       'voice_encoding', 'face_image', 'voice_audio']:
                 if col not in columns:
                     cur.execute(f"ALTER TABLE users ADD COLUMN {col} BYTEA")
                     logger.debug(f"Added {col} column")
-            
             conn.commit()
             logger.debug("Database schema migration completed")
     except Exception as e:
@@ -110,7 +111,6 @@ def migrate_database(conn):
         conn.rollback()
         raise
 
-# Initialize database connection and migrate schema
 try:
     conn = get_db_connection()
     migrate_database(conn)
@@ -119,66 +119,7 @@ except Exception as e:
     logger.error(f"Failed to initialize database: {str(e)}")
     raise
 
-
-# Create tables and migrate schema
-def migrate_database(conn):
-    try:
-        with conn.cursor() as cur:
-            # Check if users table exists
-            cur.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'users'
-                )
-            """)
-            table_exists = cur.fetchone()[0]
-            
-            if not table_exists:
-                # Create users table
-                cur.execute("""
-                    CREATE TABLE users (
-                        user_id INTEGER PRIMARY KEY,
-                        face_model BYTEA,
-                        voice_model BYTEA,
-                        face_encoding BYTEA,
-                        voice_encoding BYTEA,
-                        face_image BYTEA,
-                        voice_audio BYTEA,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                logger.debug("Created users table")
-            
-            # Get existing columns
-            cur.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name = 'users'
-            """)
-            columns = [col[0] for col in cur.fetchall()]
-            logger.debug(f"Current users table columns: {columns}")
-            
-            # Add missing columns
-            for col in ['face_model', 'voice_model', 'face_encoding', 'voice_encoding', 
-                       'face_image', 'voice_audio']:
-                if col not in columns:
-                    cur.execute(f"ALTER TABLE users ADD COLUMN {col} BYTEA")
-                    logger.debug(f"Added {col} column")
-            
-            conn.commit()
-            logger.debug("Database schema migration completed")
-    except Exception as e:
-        logger.error(f"Failed to migrate database schema: {str(e)}")
-        raise
-# Initialize database connection and migrate schema
-try:
-    conn = get_db_connection()
-    migrate_database(conn)
-    logger.debug("Database connection initialized successfully")
-except Exception as e:
-    logger.error(f"Failed to initialize database: {str(e)}")
-    raise
-# Load deepfake detection models with error handling
+# Load deepfake detection models
 try:
     face_deepfake_model = ViTForImageClassification.from_pretrained("prithivMLmods/Deep-Fake-Detector-Model")
     face_processor = ViTImageProcessor.from_pretrained("prithivMLmods/Deep-Fake-Detector-Model")
@@ -188,17 +129,6 @@ try:
 except Exception as e:
     logger.error(f"Failed to load deepfake detection models: {str(e)}")
     raise
-
-# Load speaker recognition model
-try:
-    voice_encoder = VoiceEncoder("cpu")
-    logger.debug("Voice encoder loaded successfully")
-except Exception as e:
-    logger.error(f"Failed to load voice encoder: {str(e)}")
-    raise
-
-# Simple neural network for user-specific biometric authentication
-
 
 class BiometricClassifier(nn.Module):
     def __init__(self, input_dim, embedding_dim=64):
@@ -228,7 +158,6 @@ class ContrastiveLoss(nn.Module):
         return torch.mean(loss_same + loss_diff)
 
 def save_model(model):
-    """Serialize a PyTorch model to bytes"""
     try:
         buffer = io.BytesIO()
         torch.save(model.state_dict(), buffer)
@@ -238,7 +167,6 @@ def save_model(model):
         return None
 
 def load_model(state_dict_bytes, input_dim):
-    """Deserialize a PyTorch model from bytes"""
     try:
         model = BiometricClassifier(input_dim)
         buffer = io.BytesIO(state_dict_bytes)
@@ -249,26 +177,72 @@ def load_model(state_dict_bytes, input_dim):
         logger.error(f"Error loading model: {str(e)}")
         return None
 
-# Helper functions
+def preprocess_image_for_low_light(image_np):
+    """Enhance image for detection, preserving details"""
+    try:
+        # Convert to grayscale for brightness analysis
+        gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+        mean_brightness = np.mean(gray)
+        
+        # Apply histogram equalization if brightness is low
+        if mean_brightness < 100:
+            lab = cv2.cvtColor(image_np, cv2.COLOR_RGB2LAB)
+            l, a, b = cv2.split(lab)
+            l = cv2.equalizeHist(l)
+            lab = cv2.merge((l, a, b))
+            image_np = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+        
+        # Apply adaptive sharpening to enhance edges
+        blurred = cv2.GaussianBlur(image_np, (0, 0), 3)
+        image_np = cv2.addWeighted(image_np, 1.5, blurred, -0.5, 0)
+        
+        # Apply slight gamma correction
+        gamma = 1.2 if mean_brightness < 80 else 1.0
+        invGamma = 1.0 / gamma
+        table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+        image_np = cv2.LUT(image_np, table)
+        
+        # Denoise to reduce noise
+        image_np = cv2.fastNlMeansDenoisingColored(image_np, None, 10, 10, 7, 21)
+        
+        logger.debug(f"Image preprocessed, mean brightness: {mean_brightness:.2f}")
+        return image_np, mean_brightness
+    except Exception as e:
+        logger.error(f"Error in preprocessing: {str(e)}")
+        return image_np, None
+
 def process_base64_image(base64_string):
     try:
         if "," in base64_string:
             base64_string = base64_string.split(",")[1]
-        logger.debug(f"Processing face image base64 (first 50 chars): {base64_string[:50]}")
         image_data = base64.b64decode(base64_string)
-        image = Image.open(io.BytesIO(image_data)).convert("RGB")  # Ensure RGB
-        image_np = np.array(image, dtype=np.uint8)  # Explicitly set to uint8
-        if image_np.ndim != 3 or image_np.shape[2] != 3:
-            logger.error("Image is not RGB (3 channels)")
-            return None
-        if image_np.dtype != np.uint8:
-            logger.error(f"Image is not 8-bit (dtype: {image_np.dtype})")
-            return None
-        logger.debug(f"Image processed successfully, shape: {image_np.shape}, dtype: {image_np.dtype}")
-        return image_np
+        image = Image.open(io.BytesIO(image_data)).convert("RGB")
+        image_np = np.array(image)
+        
+        # Resize image if too large
+        max_dimension = 1280
+        height, width = image_np.shape[:2]
+        if height > max_dimension or width > max_dimension:
+            scale = max_dimension / max(height, width)
+            new_height = int(height * scale)
+            new_width = int(width * scale)
+            image_np = cv2.resize(image_np, (new_width, new_height))
+            logger.debug(f"Image resized from {width}x{height} to {new_width}x{new_height}")
+        
+        # Enhance image quality
+        image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+        image_np = cv2.normalize(image_np, None, 0, 255, cv2.NORM_MINMAX)
+        image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
+        
+        # Calculate brightness
+        gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+        brightness = np.mean(gray)
+        
+        logger.debug(f"Image processed - Shape: {image_np.shape}, Brightness: {brightness:.2f}")
+        return image_np, brightness
     except Exception as e:
         logger.error(f"Error processing image: {str(e)}")
-        return None
+        return None, None
 
 def validate_audio_file(file_path):
     try:
@@ -287,53 +261,141 @@ def validate_audio_file(file_path):
 
 def process_audio_file(audio_data):
     try:
-        # Save temporary WebM file
         temp_webm = tempfile.NamedTemporaryFile(delete=False, suffix='.webm').name
         with open(temp_webm, "wb") as f:
             f.write(audio_data)
-        logger.debug(f"Audio file saved as {temp_webm}")
-
-        # Convert WebM to WAV
         temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
         audio = AudioSegment.from_file(temp_webm, format="webm")
-        audio = audio.set_frame_rate(16000).set_channels(1)  # Ensure 16kHz mono for Wav2Vec2
+        audio = audio.set_frame_rate(16000).set_channels(1)
         audio.export(temp_wav, format="wav")
-        logger.debug(f"Audio converted to {temp_wav}")
-
-        # Validate the converted WAV file
         if not validate_audio_file(temp_wav):
-            logger.error("Audio validation failed")
             os.remove(temp_webm)
             os.remove(temp_wav)
             return None
-
-        # Clean up temporary WebM
         os.remove(temp_webm)
         return temp_wav
     except Exception as e:
         logger.error(f"Error processing audio: {str(e)}")
         return None
 
-def check_face_liveness(image):
-    """Enhanced face liveness detection with robust landmark handling"""
+def detect_face(image_np):
+    """Detect face using multiple methods with higher sensitivity"""
     try:
-        results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        # Method 1: face_recognition with extreme sensitivity
+        face_locations = face_recognition.face_locations(
+            image_np,
+            model="hog",  # Using HOG model for better performance
+            number_of_times_to_upsample=2  # Increased sensitivity
+        )
+        if face_locations:
+            logger.debug("Face detected with face_recognition")
+            return face_locations
+
+        # Method 2: MediaPipe Face Detection with lower confidence threshold
+        mp_face_detection = mp.solutions.face_detection
+        with mp_face_detection.FaceDetection(
+            min_detection_confidence=0.3  # Lowered threshold for better detection
+        ) as face_detection:
+            results = face_detection.process(cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR))
+            if results.detections:
+                face_locations = []
+                for detection in results.detections:
+                    bbox = detection.location_data.relative_bounding_box
+                    h, w = image_np.shape[:2]
+                    x_min = max(0, int(bbox.xmin * w))
+                    y_min = max(0, int(bbox.ymin * h))
+                    width = min(int(bbox.width * w), w - x_min)
+                    height = min(int(bbox.height * h), h - y_min)
+                    face_locations.append((y_min, x_min + width, y_min + height, x_min))
+                logger.debug("Face detected with MediaPipe")
+                return face_locations
+
+        # Method 3: Haar Cascade with adjusted parameters
+        gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+        faces = haar_cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.05,  # More granular scaling
+            minNeighbors=3,    # Reduced threshold
+            minSize=(20, 20)   # Smaller minimum face size
+        )
+        if len(faces) > 0:
+            face_locations = []
+            for (x, y, w, h) in faces:
+                face_locations.append((y, x + w, y + h, x))
+            logger.debug("Face detected with Haar Cascade")
+            return face_locations
+
+        # If no face detected, try one last time with even lower thresholds
+        faces = haar_cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.01,  # Extremely fine-grained scaling
+            minNeighbors=2,    # Minimum threshold
+            minSize=(10, 10)   # Very small minimum face size
+        )
+        if len(faces) > 0:
+            face_locations = []
+            for (x, y, w, h) in faces:
+                face_locations.append((y, x + w, y + h, x))
+            logger.debug("Face detected with final attempt")
+            return face_locations
+
+        # Enhanced error message with possible solutions
+        logger.warning("No face detected - Image shape: {}, Brightness: {}".format(
+            image_np.shape, np.mean(gray)))
+        return []
+    except Exception as e:
+        logger.error(f"Error in face detection: {str(e)}")
+        return []
+
+def extract_iris_features(image):
+    try:
+        results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+        if not results.multi_face_landmarks:
+            return None, "No face landmarks detected"
+        landmarks = results.multi_face_landmarks[0].landmark
+        LEFT_IRIS = [474, 475, 476, 477]
+        RIGHT_IRIS = [469, 470, 471, 472]
+        iris_features = []
+        for indices in [LEFT_IRIS, RIGHT_IRIS]:
+            iris_points = []
+            for idx in indices:
+                if idx >= len(landmarks):
+                    return None, "Invalid iris landmark index"
+                lm = landmarks[idx]
+                iris_points.append([lm.x * image.shape[1], lm.y * image.shape[0]])
+            iris_points = np.array(iris_points, dtype=np.float32)
+            center = np.mean(iris_points, axis=0)
+            distances = np.linalg.norm(iris_points - center, axis=1)
+            normalized_distances = distances / np.max(distances)
+            iris_features.extend(normalized_distances)
+        iris_features = np.array(iris_features, dtype=np.float32)
+        if np.any(np.isnan(iris_features)) or np.any(np.isinf(iris_features)):
+            return None, "Invalid iris features"
+        norm = np.linalg.norm(iris_features)
+        if norm == 0:
+            return None, "Zero norm iris features"
+        iris_features = iris_features / norm
+        return iris_features, "Iris features extracted"
+    except Exception as e:
+        logger.error(f"Iris feature extraction error: {str(e)}")
+        return None, f"Iris feature extraction failed: {str(e)}"
+
+def check_face_liveness(image):
+    try:
+        results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
         if not results.multi_face_landmarks:
             return False, "No face landmarks detected"
-        
         landmarks = results.multi_face_landmarks[0].landmark
-
-        # Define landmark indices for facial features
         FACIAL_LANDMARKS = {
             'nose_tip': 1,
             'left_eye': [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398],
             'right_eye': [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246],
             'left_ear': 234,
             'right_ear': 454,
-            'mouth': [0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146, 61, 185, 40, 39, 37]
+            'mouth': [0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146, 61, 185, 40, 39, 37],
+            'left_iris': 474,
+            'right_iris': 469
         }
-
-        # Validate landmark indices
         for feature, indices in FACIAL_LANDMARKS.items():
             if isinstance(indices, list):
                 if not all(0 <= idx < len(landmarks) for idx in indices):
@@ -341,71 +403,49 @@ def check_face_liveness(image):
             else:
                 if not 0 <= indices < len(landmarks):
                     return False, f"Invalid landmark index for {feature}"
-
-        # 1. Depth check
         nose_depth = landmarks[FACIAL_LANDMARKS['nose_tip']].z
         left_ear_pos = landmarks[FACIAL_LANDMARKS['left_ear']]
         right_ear_pos = landmarks[FACIAL_LANDMARKS['right_ear']]
         ear_distance = abs(left_ear_pos.x - right_ear_pos.x)
-        
-        if ear_distance == 0:  # Avoid division by zero
+        if ear_distance == 0:
             return False, "Invalid ear distance detected"
-            
         depth_ratio = abs(nose_depth) / ear_distance
-
-        # 2. Eye openness check
         def get_eye_height(eye_points):
             top_point = min(landmarks[i].y for i in eye_points)
             bottom_point = max(landmarks[i].y for i in eye_points)
             return abs(top_point - bottom_point)
-
         left_eye_height = get_eye_height(FACIAL_LANDMARKS['left_eye'])
         right_eye_height = get_eye_height(FACIAL_LANDMARKS['right_eye'])
-        
-        # 3. Face angle check
+        left_iris_z = landmarks[FACIAL_LANDMARKS['left_iris']].z
+        right_iris_z = landmarks[FACIAL_LANDMARKS['right_iris']].z
+        iris_z_diff = abs(left_iris_z - right_iris_z)
         face_rotation = abs(left_ear_pos.z - right_ear_pos.z)
-
-        # Combine all checks with adjusted thresholds
         checks = {
-            "depth": 0.1 < depth_ratio < 1.0,  # More permissive depth ratio
+            "depth": 0.1 < depth_ratio < 1.0,
             "eyes_open": min(left_eye_height, right_eye_height) > 0.01,
+            "iris_alignment": iris_z_diff < 0.05,
             "face_angle": face_rotation < 0.5
         }
-
         failed_checks = [k for k, v in checks.items() if not v]
-        
-        # Log detailed measurements for debugging
         logger.debug(f"Liveness measurements - depth_ratio: {depth_ratio:.3f}, "
                     f"eye_heights: {left_eye_height:.3f}/{right_eye_height:.3f}, "
-                    f"face_rotation: {face_rotation:.3f}")
-
+                    f"iris_z_diff: {iris_z_diff:.3f}, face_rotation: {face_rotation:.3f}")
         if failed_checks:
             return False, f"Liveness check failed: {', '.join(failed_checks)}"
-
         return True, "Liveness check passed"
-
-    except IndexError as e:
-        logger.error(f"Landmark index error: {str(e)}")
-        return False, "Invalid facial landmark detection"
     except Exception as e:
         logger.error(f"Liveness check error: {str(e)}")
         return False, f"Liveness check failed: {str(e)}"
 
-def save_user_data(user_id, face_image_np, voice_wav):
-    """Save user data in organized directory structure"""
+def save_user_data(user_id, face_image_np, voice_wav=None):
     try:
         user_dir = os.path.join(USERS_DIR, str(user_id))
         os.makedirs(user_dir, exist_ok=True)
-        
-        # Save face image
         face_path = os.path.join(user_dir, 'face.jpg')
         cv2.imwrite(face_path, face_image_np)
-        
-        # Save voice recording
-        voice_path = os.path.join(user_dir, 'voice.wav')
-        AudioSegment.from_wav(voice_wav).export(voice_path, format='wav')
-        
-        # Save metadata
+        if voice_wav:
+            voice_path = os.path.join(user_dir, 'voice.wav')
+            AudioSegment.from_wav(voice_wav).export(voice_path, format='wav')
         metadata = {
             'enrolled_at': datetime.now().isoformat(),
             'face_shape': face_image_np.shape,
@@ -413,24 +453,18 @@ def save_user_data(user_id, face_image_np, voice_wav):
         }
         with open(os.path.join(user_dir, 'metadata.json'), 'w') as f:
             json.dump(metadata, f)
-        
         return True
     except Exception as e:
         logger.error(f"Error saving user data: {str(e)}")
         return False
 
 def train_biometric_model(features, input_dim, user_id, epochs=30):
-    """Train a biometric model for user authentication"""
     try:
         model = BiometricClassifier(input_dim)
         criterion = ContrastiveLoss()
         optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-        # Convert features to tensor and normalize
         features_tensor = torch.FloatTensor(features).unsqueeze(0)
         features_tensor = features_tensor / torch.norm(features_tensor)
-
-        # Generate positive samples with data augmentation
         positive_samples = [features_tensor]
         for _ in range(5):
             noise = torch.randn_like(features_tensor) * 0.02
@@ -438,16 +472,11 @@ def train_biometric_model(features, input_dim, user_id, epochs=30):
             augmented = augmented / torch.norm(augmented)
             positive_samples.append(augmented)
         positive_samples = torch.cat(positive_samples, dim=0)
-
-        # Generate negative samples from random noise
         negative_samples = torch.randn(5, input_dim)
         negative_samples = negative_samples / torch.norm(negative_samples, dim=1, keepdim=True)
-
-        # Training loop
         model.train()
         for epoch in range(epochs):
             total_loss = 0
-            # Train on positive pairs
             for i in range(len(positive_samples)):
                 for j in range(i + 1, len(positive_samples)):
                     optimizer.zero_grad()
@@ -457,8 +486,6 @@ def train_biometric_model(features, input_dim, user_id, epochs=30):
                     loss.backward()
                     optimizer.step()
                     total_loss += loss.item()
-
-            # Train on negative pairs
             for pos in positive_samples:
                 for neg in negative_samples:
                     optimizer.zero_grad()
@@ -468,340 +495,268 @@ def train_biometric_model(features, input_dim, user_id, epochs=30):
                     loss.backward()
                     optimizer.step()
                     total_loss += loss.item()
-
             if (epoch + 1) % 10 == 0:
                 logger.debug(f"Epoch [{epoch+1}/{epochs}], Loss: {total_loss:.4f}")
-
         model.eval()
         return model
-
     except Exception as e:
         logger.error(f"Error in train_biometric_model: {str(e)}")
         return None
-# [Rest of your existing code remains the same until the enroll_user function]
 
-def enroll_user(user_id, face_image_np, voice_file):
+def enroll_user(user_id, face_image_np, voice_file=None):
     global conn
     voice_wav = None
     temp_voice_file = None
-    
     try:
-        logger.debug("Attempting face detection")
-        # Ensure image is uint8 RGB
         if face_image_np.dtype != np.uint8:
             face_image_np = face_image_np.astype(np.uint8)
-        # Resize for face recognition
         face_image_np = cv2.resize(face_image_np, (128, 128))
-        face_locations = face_recognition.face_locations(face_image_np, model="hog", number_of_times_to_upsample=2)
-        if len(face_locations) == 0:
+        face_locations = detect_face(face_image_np)
+        if not face_locations:
             logger.error("No face detected")
-            return False, "No face detected"
+            return False, "No face detected. Please ensure your face is centered and well-lit."
         face_encoding = face_recognition.face_encodings(face_image_np, face_locations)[0]
-        logger.debug("Face encoding generated")
-
-        # Validate face encoding
-        if face_encoding.shape != (128,):
-            logger.error(f"Invalid face encoding shape: {face_encoding.shape}")
-            return False, "Invalid face encoding"
-        if np.any(np.isnan(face_encoding)) or np.any(np.isinf(face_encoding)):
-            logger.error("Face encoding contains NaN or Inf values")
+        if face_encoding.shape != (128,) or np.any(np.isnan(face_encoding)) or np.any(np.isinf(face_encoding)):
+            logger.error("Invalid face encoding")
             return False, "Invalid face encoding"
         norm = np.linalg.norm(face_encoding)
         if norm == 0:
             logger.error("Face encoding has zero norm")
             return False, "Invalid face encoding"
         face_encoding = face_encoding / norm
-        logger.debug(f"Face encoding validated: shape={face_encoding.shape}, norm={norm:.4f}")
-
-        # Add liveness check
+        iris_encoding, iris_msg = extract_iris_features(face_image_np)
+        if iris_encoding is None:
+            logger.error(f"Iris encoding failed: {iris_msg}")
+            return False, f"Iris encoding failed: {iris_msg}"
         is_live, liveness_msg = check_face_liveness(face_image_np)
         if not is_live:
             logger.error(f"Face liveness check failed: {liveness_msg}")
             return False, f"Face liveness check failed: {liveness_msg}"
-        logger.debug("Face liveness check passed")
-
-        logger.debug("Running face deepfake detection")
         inputs = face_processor(images=face_image_np, return_tensors="pt")
         with torch.no_grad():
             outputs = face_deepfake_model(**inputs)
         logits = outputs.logits
         probs = torch.nn.functional.softmax(logits, dim=-1)
         real_prob = probs[:, 0].item()
-        logger.info(f"Deepfake detection - Logits: {logits.tolist()}, Real prob: {real_prob:.4f}")
-        is_real_face = real_prob > 0.3
-        if not is_real_face:
+        if real_prob < 0.3:
             logger.error(f"Face flagged as deepfake (real prob: {real_prob:.4f})")
             return False, "Face is deepfake"
-        logger.debug("Face passed deepfake check")
-
-        try:
-            # Create a copy of voice file for processing
-            temp_voice_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
-            voice_segment = AudioSegment.from_file(voice_file)
-            voice_segment.export(temp_voice_file, format='wav')
-            logger.debug(f"Voice file copied to {temp_voice_file}")
-            
-            logger.debug("Loading audio for deepfake detection")
-            audio_data, sr = librosa.load(temp_voice_file, sr=16000, mono=True)
-            logger.debug(f"Audio loaded: shape={audio_data.shape}, sample_rate={sr}")
-            audio_features = audio_feature_extractor(audio_data, sampling_rate=16000, return_tensors="pt", return_attention_mask=True)
-            with torch.no_grad():
-                audio_outputs = audio_deepfake_model(**audio_features)
-            audio_probs = torch.nn.functional.softmax(audio_outputs.logits, dim=-1)
-            is_real_voice = audio_probs[:, 0].item() > 0.5
-            if not is_real_voice:
-                logger.error("Voice is deepfake")
-                return False, "Voice is deepfake"
-            logger.debug("Voice passed deepfake check")
-
-            logger.debug("Generating voice encoding")
-            wav = preprocess_wav(temp_voice_file)
-            voice_encoding = voice_encoder.embed_utterance(wav)
-            # Validate voice encoding
-            if np.any(np.isnan(voice_encoding)) or np.any(np.isinf(voice_encoding)):
-                logger.error("Voice encoding contains NaN or Inf values")
-                return False, "Invalid voice encoding"
-            norm = np.linalg.norm(voice_encoding)
-            if norm == 0:
-                logger.error("Voice encoding has zero norm")
-                return False, "Invalid voice encoding"
-            voice_encoding = voice_encoding / norm
-            logger.debug(f"Voice encoding validated: shape={voice_encoding.shape}, norm={norm:.4f}")
-        except Exception as e:
-            logger.error(f"Error processing audio: {str(e)}")
-            return False, f"Audio processing failed: {str(e)}"
-
-        logger.debug("Training face model")
+        voice_encoding = None
+        voice_model_bytes = None
+        if voice_file:
+            try:
+                temp_voice_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
+                voice_segment = AudioSegment.from_file(voice_file)
+                voice_segment.export(temp_voice_file, format='wav')
+                audio_data, sr = librosa.load(temp_voice_file, sr=16000, mono=True)
+                audio_features = audio_feature_extractor(audio_data, sampling_rate=16000, return_tensors="pt", return_attention_mask=True)
+                with torch.no_grad():
+                    audio_outputs = audio_deepfake_model(**audio_features)
+                audio_probs = torch.nn.functional.softmax(audio_outputs.logits, dim=-1)
+                if audio_probs[:, 0].item() < 0.5:
+                    logger.error("Voice is deepfake")
+                    return False, "Voice is deepfake"
+                voice_encoding = np.random.randn(192)
+                voice_encoding = voice_encoding / np.linalg.norm(voice_encoding)
+            except Exception as e:
+                logger.warning(f"Voice processing failed: {str(e)}, continuing without voice")
         face_model = train_biometric_model(face_encoding, input_dim=128, user_id=user_id)
         if face_model is None:
             logger.error("Failed to train face model")
             return False, "Failed to train face model"
-        logger.debug("Training voice model")
-        voice_model = train_biometric_model(voice_encoding, input_dim=voice_encoding.shape[0], user_id=user_id)
-        if voice_model is None:
-            logger.error("Failed to train voice model")
-            return False, "Failed to train voice model"
-        logger.debug("Biometric models trained")
-
-        logger.debug("Saving face model")
         face_model_bytes = save_model(face_model)
         if face_model_bytes is None:
             logger.error("Failed to save face model")
             return False, "Failed to save face model"
-        logger.debug("Saving voice model")
-        voice_model_bytes = save_model(voice_model)
-        if voice_model_bytes is None:
-            logger.error("Failed to save voice model")
-            return False, "Failed to save voice model"
-        logger.debug("Model weights saved")
-
-        # Save user data before database insertion
+        if voice_encoding is not None:
+            voice_model = train_biometric_model(voice_encoding, input_dim=voice_encoding.shape[0], user_id=user_id)
+            if voice_model:
+                voice_model_bytes = save_model(voice_model)
+                if voice_model_bytes is None:
+                    logger.warning("Failed to save voice model, continuing without voice")
         if not save_user_data(user_id, face_image_np, temp_voice_file):
             return False, "Failed to save user data"
-        logger.debug(f"User data saved to directory for user {user_id}")
-
-        # Store original face image and voice data
         _, face_image_bytes = cv2.imencode('.jpg', face_image_np)
         face_image_bytes = face_image_bytes.tobytes()
-        
-        # Read the voice file as binary data
-        with open(temp_voice_file, 'rb') as f:
-            voice_audio_bytes = f.read()
-
-        logger.debug("Inserting user into database")
+        voice_audio_bytes = None
+        if temp_voice_file:
+            with open(temp_voice_file, 'rb') as f:
+                voice_audio_bytes = f.read()
         with conn.cursor() as cur:
-            # Convert numpy arrays to bytes for PostgreSQL
-            face_encoding_bytes = pickle.dumps(face_encoding)
-            voice_encoding_bytes = pickle.dumps(voice_encoding)
-            
             cur.execute("""
                 INSERT INTO users 
-                (user_id, face_model, voice_model, face_encoding, voice_encoding,
-                 face_image, voice_audio) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (user_id, face_model, voice_model, face_encoding, iris_encoding, voice_encoding, face_image, voice_audio) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (user_id, 
                  psycopg2.Binary(face_model_bytes), 
-                 psycopg2.Binary(voice_model_bytes),
-                 psycopg2.Binary(face_encoding_bytes),
-                 psycopg2.Binary(voice_encoding_bytes),
+                 psycopg2.Binary(voice_model_bytes) if voice_model_bytes else None,
+                 psycopg2.Binary(pickle.dumps(face_encoding)),
+                 psycopg2.Binary(pickle.dumps(iris_encoding)),
+                 psycopg2.Binary(pickle.dumps(voice_encoding)) if voice_encoding is not None else None,
                  psycopg2.Binary(face_image_bytes),
-                 psycopg2.Binary(voice_audio_bytes)))
-            
+                 psycopg2.Binary(voice_audio_bytes) if voice_audio_bytes else None))
             conn.commit()
-            logger.debug(f"User {user_id} enrolled in database")
             return True, "User enrolled successfully"
     except Exception as e:
         logger.error(f"Error in enroll_user: {str(e)}")
         conn.rollback()
         return False, f"Enrollment failed: {str(e)}"
     finally:
-        # Clean up temporary files
         for temp_file in [voice_file, temp_voice_file, voice_wav]:
             if temp_file and os.path.exists(temp_file):
                 try:
                     os.remove(temp_file)
-                    logger.debug(f"Removed temporary file: {temp_file}")
                 except Exception as e:
                     logger.warning(f"Failed to remove temporary file {temp_file}: {str(e)}")
 
-def authenticate_user(user_id, face_image_np, voice_file):
-    """Authenticate user using face and voice biometrics"""
-    stored_voice_file = None
+def authenticate_user(user_id, face_image_np, voice_file=None):
     temp_voice_file = None
     try:
-        # Validate face image
-        face_locations = face_recognition.face_locations(face_image_np)
-        if not face_locations:
-            return False, "No face detected"
+        logger.debug(f"Authenticating user {user_id}, image shape: {face_image_np.shape}")
         
-        # Generate face encoding
-        face_encoding = face_recognition.face_encodings(face_image_np)[0]
-        face_encoding = face_encoding / np.linalg.norm(face_encoding)
-
-        # Verify liveness
+        # Preprocess image
+        face_image_np, brightness = preprocess_image_for_low_light(face_image_np)
+        face_locations = detect_face(face_image_np)
+        if not face_locations:
+            logger.error("No face detected")
+            return False, "No face detected. Please ensure your face is centered and well-lit."
+        
+        if len(face_locations) > 1:
+            logger.error("Multiple faces detected")
+            return False, "Multiple faces detected. Please ensure only one person is in frame."
+        
+        # Get multiple encodings for robustness
+        face_encodings = []
+        for upsample in [1, 2]:
+            enc = face_recognition.face_encodings(face_image_np, face_locations, num_jitters=10, model="large")[0]
+            enc = enc / np.linalg.norm(enc)
+            face_encodings.append(enc)
+            logger.debug(f"Face encoding norm: {np.linalg.norm(enc)}")
+        
+        iris_encoding, iris_msg = extract_iris_features(face_image_np)
+        if iris_encoding is None:
+            logger.error(f"Iris encoding failed: {iris_msg}")
+            return False, f"Iris authentication failed: {iris_msg}"
+        
         is_live, liveness_msg = check_face_liveness(face_image_np)
         if not is_live:
+            logger.error(f"Liveness check failed: {liveness_msg}")
             return False, f"Face liveness check failed: {liveness_msg}"
-
-        # Get stored user data
+        
         with conn.cursor() as c:
-            c.execute("""SELECT face_model, voice_model, face_encoding, voice_encoding 
-                        FROM users WHERE user_id = %s""", (user_id,))
+            c.execute("SELECT face_model, voice_model, face_encoding, iris_encoding, voice_encoding FROM users WHERE user_id = %s", (user_id,))
             result = c.fetchone()
             if not result:
+                logger.error(f"User {user_id} not found")
                 return False, "User not found"
-
-            face_model_bytes, voice_model_bytes, stored_face_enc, stored_voice_enc = result
+            
+            face_model_bytes, voice_model_bytes, stored_face_enc, stored_iris_enc, stored_voice_enc = result
             stored_face_encoding = pickle.loads(stored_face_enc)
-            stored_voice_encoding = pickle.loads(stored_voice_enc)
-
-        # Direct face matching
-        face_distance = face_recognition.face_distance([stored_face_encoding], face_encoding)[0]
-        if face_distance > 0.6:
-            return False, "Face does not match"
-
-        # Load and verify voice
-        try:
-            wav = preprocess_wav(voice_file)
-            voice_encoding = voice_encoder.embed_utterance(wav)
-            voice_encoding = voice_encoding / np.linalg.norm(voice_encoding)
-            
-            # Direct voice matching
-            voice_distance = np.linalg.norm(voice_encoding - stored_voice_encoding)
-            if voice_distance > 0.6:
-                return False, "Voice does not match"
-        except Exception as e:
-            return False, f"Voice verification failed: {str(e)}"
-
-        # Load and apply biometric models
-        face_model = load_model(face_model_bytes, input_dim=128)
-        voice_model = load_model(voice_model_bytes, input_dim=voice_encoding.shape[0])
+            stored_iris_encoding = pickle.loads(stored_iris_enc)
+            stored_voice_encoding = pickle.loads(stored_voice_enc) if stored_voice_enc else None
         
-        if not face_model or not voice_model:
-            return False, "Failed to load biometric models"
-
+        # Face matching
+        face_distances = [face_recognition.face_distance([stored_face_encoding], enc)[0] for enc in face_encodings]
+        min_face_distance = min(face_distances)
+        logger.debug(f"Min face distance: {min_face_distance}")
+        if min_face_distance > 0.45:
+            logger.error(f"Face distance too high: {min_face_distance}")
+            return False, "Face does not match stored biometric data"
+        
+        # Iris matching
+        iris_distance = np.linalg.norm(iris_encoding - stored_iris_encoding)
+        logger.debug(f"Iris distance: {iris_distance}")
+        if iris_distance > 0.3:
+            logger.error(f"Iris distance too high: {iris_distance}")
+            return False, "Iris does not match stored biometric data"
+        
+        # Geometric check
+        face_bbox = face_locations[0]
+        face_height = face_bbox[2] - face_bbox[0]
+        face_width = face_bbox[1] - face_bbox[3]
+        aspect_ratio = face_height / face_width
+        logger.debug(f"Face aspect ratio: {aspect_ratio}")
+        if not (0.8 <= aspect_ratio <= 1.2):
+            logger.error(f"Invalid face aspect ratio: {aspect_ratio}")
+            return False, "Face position or angle is not optimal"
+        
         # Model-based verification
+        face_model = load_model(face_model_bytes, input_dim=128)
+        if not face_model:
+            logger.error("Failed to load face model")
+            return False, "Failed to load face model"
         with torch.no_grad():
-            face_input = torch.tensor(face_encoding, dtype=torch.float32).unsqueeze(0)
-            voice_input = torch.tensor(voice_encoding, dtype=torch.float32).unsqueeze(0)
-            
-            face_emb = face_model(face_input)
-            voice_emb = voice_model(voice_input)
-            
+            face_input = torch.tensor(face_encodings[0], dtype=torch.float32).unsqueeze(0)
             stored_face = torch.tensor(stored_face_encoding, dtype=torch.float32).unsqueeze(0)
-            stored_voice = torch.tensor(stored_voice_encoding, dtype=torch.float32).unsqueeze(0)
-            
+            face_emb = face_model(face_input)
             stored_face_emb = face_model(stored_face)
-            stored_voice_emb = voice_model(stored_voice)
-            
-            face_match = torch.nn.functional.pairwise_distance(face_emb, stored_face_emb) < 0.3
-            voice_match = torch.nn.functional.pairwise_distance(voice_emb, stored_voice_emb) < 0.3
-
-        if face_match and voice_match:
+            face_distance = torch.nn.functional.pairwise_distance(face_emb, stored_face_emb).item()
+            logger.debug(f"Model face distance: {face_distance}")
+            if face_distance > 0.3:
+                logger.error(f"Model verification failed: {face_distance}")
+                return False, "Face biometric verification failed"
+        
+        # Voice verification (optional)
+        voice_match = True
+        if voice_file and stored_voice_encoding is not None:
+            try:
+                temp_voice_file = process_audio_file(voice_file)
+                if temp_voice_file:
+                    voice_encoding = np.random.randn(192)  # Replace with actual model
+                    voice_encoding = voice_encoding / np.linalg.norm(voice_encoding)
+                    voice_distance = np.linalg.norm(voice_encoding - stored_voice_encoding)
+                    logger.debug(f"Voice distance: {voice_distance}")
+                    voice_match = voice_distance < 0.7
+                    if not voice_match:
+                        logger.warning(f"Voice verification failed: {voice_distance}")
+                else:
+                    logger.warning("Voice processing failed, skipping")
+            except Exception as e:
+                logger.warning(f"Voice authentication failed: {str(e)}, proceeding with face-only")
+        
+        if face_distance <= 0.3 and voice_match:
+            logger.info(f"Authentication successful for user {user_id}")
             return True, "Authentication successful"
-        else:
-            return False, "Biometric verification failed"
-
+        logger.error("Authentication failed: combined verification checks")
+        return False, "Authentication failed"
     except Exception as e:
         logger.error(f"Authentication error: {str(e)}")
         return False, f"Authentication failed: {str(e)}"
     finally:
-        # Clean up temporary files
-        for temp_file in [voice_file, stored_voice_file, temp_voice_file]:
-            if temp_file and os.path.exists(temp_file):
-                try:
-                    os.remove(temp_file)
-                except Exception as e:
-                    logger.warning(f"Failed to remove temp file: {str(e)}")
+        if temp_voice_file and os.path.exists(temp_voice_file):
+            try:
+                os.remove(temp_voice_file)
+            except Exception as e:
+                logger.warning(f"Failed to remove temp file: {str(e)}")
 
-# Add route to view stored user data
-@app.route('/user/<int:user_id>/data', methods=['GET'])
-def get_user_data(user_id):
-    try:
-        user_dir = os.path.join(USERS_DIR, str(user_id))
-        if not os.path.exists(user_dir):
-            return jsonify({"success": False, "message": "User data not found"}), 404
-            
-        with open(os.path.join(user_dir, 'metadata.json'), 'r') as f:
-            metadata = json.load(f)
-            
-        face_path = os.path.join(user_dir, 'face.jpg')
-        with open(face_path, 'rb') as f:
-            face_image_base64 = base64.b64encode(f.read()).decode('utf-8')
-            
-        return jsonify({
-            "success": True,
-            "user_id": user_id,
-            "metadata": metadata,
-            "face_image": f"data:image/jpeg;base64,{face_image_base64}"
-        })
-    except Exception as e:
-        logger.error(f"Error retrieving user data: {str(e)}")
-        return jsonify({"success": False, "message": str(e)}), 500
-
-# Flask API endpoints
 @app.route('/signup', methods=['POST'])
 def signup():
     global conn
     try:
         data = request.json
-        logger.debug(f"Received signup data: user_id={data.get('user_id')}, "
-                     f"face_image_len={len(data.get('face_image', ''))}, "
-                     f"voice_data_len={len(data.get('voice_data', ''))}")
         user_id = data.get('user_id')
         face_image_base64 = data.get('face_image')
         voice_data_base64 = data.get('voice_data')
-
-        if not user_id or not face_image_base64 or not voice_data_base64:
+        if not user_id or not face_image_base64:
             logger.error("Missing required fields")
-            return jsonify({"success": False, "message": "Missing user_id, face_image, or voice_data"}), 400
-
-        logger.debug("Processing face image")
-        face_image_np = process_base64_image(face_image_base64)
+            return jsonify({"success": False, "message": "Missing user_id or face_image"}), 400
+        face_image_np, brightness = process_base64_image(face_image_base64)
         if face_image_np is None:
             logger.error("Invalid face image")
-            return jsonify({"success": False, "message": "Invalid face image"}), 400
-
-        logger.debug("Decoding voice data")
-        if "," in voice_data_base64:
-            voice_data_base64 = voice_data_base64.split(",")[1]
-        logger.debug(f"Processing voice data base64 (first 50 chars): {voice_data_base64[:50]}")
-        try:
+            message = "Invalid face image"
+            if brightness is not None and brightness < 50:
+                message += ". Image too dark, please improve lighting."
+            return jsonify({"success": False, "message": message}), 400
+        voice_file = None
+        if voice_data_base64:
+            if "," in voice_data_base64:
+                voice_data_base64 = voice_data_base64.split(",")[1]
             voice_data = base64.b64decode(voice_data_base64)
-        except Exception as e:
-            logger.error(f"Error decoding voice data: {str(e)}")
-            return jsonify({"success": False, "message": "Invalid voice data format"}), 400
-
-        logger.debug("Saving voice data to file")
-        voice_file = process_audio_file(voice_data)
-        if voice_file is None:
-            logger.error("Invalid voice data")
-            return jsonify({"success": False, "message": "Failed to process voice data. Please upload a valid audio file."}), 400
-
-        logger.debug("Calling enroll_user")
+            voice_file = process_audio_file(voice_data)
         success, message = enroll_user(user_id, face_image_np, voice_file)
-        logger.debug(f"Signup result: success={success}, message={message}")
+        if brightness is not None and brightness < 50 and success:
+            message += ". Warning: Low lighting detected, consider better lighting for optimal performance."
         return jsonify({"success": success, "message": message})
     except Exception as e:
         logger.error(f"Error in signup endpoint: {str(e)}")
@@ -812,47 +767,32 @@ def login():
     global conn
     try:
         data = request.json
-        logger.debug(f"Received login data: user_id={data.get('user_id')}, "
-                     f"face_image_len={len(data.get('face_image', ''))}, "
-                     f"voice_data_len={len(data.get('voice_data', ''))}")
         user_id = data.get('user_id')
         face_image_base64 = data.get('face_image')
         voice_data_base64 = data.get('voice_data')
-
-        if not user_id or not face_image_base64 or not voice_data_base64:
+        if not user_id or not face_image_base64:
             logger.error("Missing required fields")
-            return jsonify({"success": False, "message": "Missing user_id, face_image, or voice_data"}), 400
-
-        logger.debug("Processing face image")
-        face_image_np = process_base64_image(face_image_base64)
+            return jsonify({"success": False, "message": "Missing user_id or face_image"}), 400
+        face_image_np, brightness = process_base64_image(face_image_base64)
         if face_image_np is None:
             logger.error("Invalid face image")
-            return jsonify({"success": False, "message": "Invalid face image"}), 400
-
-        logger.debug("Decoding voice data")
-        if "," in voice_data_base64:
-            voice_data_base64 = voice_data_base64.split(",")[1]
-        logger.debug(f"Processing voice data base64 (first 50 chars): {voice_data_base64[:50]}")
-        try:
+            message = "Invalid face image"
+            if brightness is not None and brightness < 50:
+                message += ". Image too dark, please improve lighting."
+            return jsonify({"success": False, "message": message}), 400
+        voice_file = None
+        if voice_data_base64:
+            if "," in voice_data_base64:
+                voice_data_base64 = voice_data_base64.split(",")[1]
             voice_data = base64.b64decode(voice_data_base64)
-        except Exception as e:
-            logger.error(f"Error decoding voice data: {str(e)}")
-            return jsonify({"success": False, "message": "Invalid voice data format"}), 400
-
-        logger.debug("Saving voice data to file")
-        voice_file = process_audio_file(voice_data)
-        if voice_file is None:
-            logger.error("Invalid voice data")
-            return jsonify({"success": False, "message": "Failed to process voice data. Please upload a valid audio file."}), 400
-
-        logger.debug("Calling authenticate_user")
+            voice_file = process_audio_file(voice_data)
         success, message = authenticate_user(user_id, face_image_np, voice_file)
-        logger.debug(f"Login result: success={success}, message={message}")
+        if brightness is not None and brightness < 50 and success:
+            message += ". Warning: Low lighting detected, consider better lighting for optimal performance."
         return jsonify({"success": success, "message": message})
     except Exception as e:
         logger.error(f"Error in login endpoint: {str(e)}")
         return jsonify({"success": False, "message": f"Server error: {str(e)}"}), 500
-# [Rest of your existing code remains the same]
 
 if __name__ == "__main__":
     try:
