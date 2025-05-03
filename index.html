@@ -206,7 +206,7 @@
                         device_fingerprint: deviceFingerprint,
                         security_level: securityLevel
                     };
-                    const response = await axios.post('https://rwhwcvd6-5000.inc1.devtunnels.ms//signup', payload);
+                    const response = await axios.post('https://rwhwcvd6-5000.inc1.devtunnels.ms/signup', payload);
                     setMessage(response.data.message || 'Registration successful!');
                 } catch (err) {
                     let errorMessage = err.response?.data?.message || err.message;
@@ -226,7 +226,7 @@
                         voice_data: voiceData,
                         device_fingerprint: deviceFingerprint
                     };
-                    const response = await axios.post('https://rwhwcvd6-5000.inc1.devtunnels.ms//login', payload);
+                    const response = await axios.post('https://rwhwcvd6-5000.inc1.devtunnels.ms/login', payload);
                     setMessage(response.data.message);
                     if (response.data.success) {
                         setUserName(`User ${userId}`);
