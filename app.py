@@ -41,7 +41,9 @@ CORS(app, resources={
         "origins": ["http://localhost:8000", "https://face-voice.vercel.app", "https://new-frontend-url.com"],
         "methods": ["GET", "POST", "OPTIONS", "PUT", "DELETE"],
         "allow_headers": ["Content-Type", "Authorization"],
-        "expose_headers": ["Content-Range", "X-Content-Range"]
+        "expose_headers": ["Content-Range", "X-Content-Range"],
+        "supports_credentials": True,
+        "max_age": 86400
     }
 })
 # Set up logging
@@ -737,8 +739,15 @@ def authenticate_user(user_id, face_image_np, voice_file=None):
             except Exception as e:
                 logger.warning(f"Failed to remove temp file: {str(e)}")
 
-@app.route('/signup', methods=['POST'])
+@app.route('/signup', methods=['POST', 'OPTIONS'])
 def signup():
+    if request.method == 'OPTIONS':
+        response = jsonify({})
+        response.headers.add('Access-Control-Allow-Origin', 'https://face-voice.vercel.app')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
+        return response
+
     global conn
     try:
         data = request.json
@@ -769,8 +778,15 @@ def signup():
         logger.error(f"Error in signup endpoint: {str(e)}")
         return jsonify({"success": False, "message": f"Server error: {str(e)}"}), 500
 
-@app.route('/login', methods=['POST'])
+@app.route('/login', methods=['POST', 'OPTIONS'])
 def login():
+    if request.method == 'OPTIONS':
+        response = jsonify({})
+        response.headers.add('Access-Control-Allow-Origin', 'https://face-voice.vercel.app')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
+        return response
+
     global conn
     try:
         data = request.json
